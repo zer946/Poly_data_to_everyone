@@ -1,0 +1,137 @@
+name: polydata
+
+x-common: &common
+  restart: unless-stopped
+  logging:
+    driver: json-file
+    options:
+      max-size: "5m"
+      max-file: "2"
+  security_opt: ["no-new-privileges:true"]
+
+services:
+  redis:
+    <<: *common
+    image: redis:7.4-bookworm
+    command: ["redis-server", "--save", "300", "1", "--appendonly", "no", "--maxmemory", "80mb", "--maxmemory-policy", "noeviction", "--client-output-buffer-limit", "pubsub 32mb 16mb 60"]
+    # Private compose network only: Redis is never published on the VPS.
+    volumes: ["redis-data:/data"]
+    mem_limit: 128m
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      retries: 12
+
+  discovery:
+    <<: *common
+    image: polydata-discovery:local
+    build:
+      context: .upstream
+      dockerfile: services/polymarket/polymarket-active-markets/Dockerfile
+    command: ["python", "run.py"]
+    mem_limit: 160m
+    memswap_limit: 320m
+    environment:
+      REDIS_URL: redis://redis:6379
+      REDIS_STREAM_MARKET_EVENTS: polymarket:market_events
+      REDIS_KEY_ACTIVE_MARKETS: polymarket:active_markets
+      REDIS_KEY_ACTIVE_MARKETS_COUNT: polymarket:active_markets:count
+    depends_on:
+      redis: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import redis; r=redis.Redis(host='redis'); raise SystemExit(not r.exists('polymarket:active_markets'))"]
+      interval: 10s
+      start_period: 300s
+      retries: 60
+
+  receiver:
+    <<: *common
+    image: polydata-receiver:local
+    build: {context: ., target: receiver}
+    mem_limit: 96m
+    memswap_limit: 128m
+    environment:
+      DATA_DIR: /data
+      REDIS_ADDR: redis:6379
+      REDIS_CHANNEL: polymarket:events
+      GOMEMLIMIT: 64MiB
+      WAL_ROTATE_SECONDS: ${WAL_ROTATE_SECONDS:-300}
+      WAL_SEGMENT_BYTES: ${WAL_SEGMENT_BYTES:-33554432}
+      DISK_RESERVE_BYTES: ${DISK_RESERVE_BYTES:-2147483648}
+    volumes: ["./data:/data"]
+    depends_on:
+      redis: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD", "polyspool", "health"]
+      interval: 5s
+      retries: 12
+
+  feed:
+    <<: *common
+    image: polydata-pmxt:local
+    build: {context: ., target: pmxt}
+    mem_limit: 420m
+    memswap_limit: 840m
+    stop_grace_period: 30s
+    ulimits:
+      nofile: {soft: 65536, hard: 65536}
+    volumes: ["./data:/data"]
+    environment:
+      DATA_DIR: /data
+      WAL_ROTATE_SECONDS: ${WAL_ROTATE_SECONDS:-300}
+      DISK_RESERVE_BYTES: ${DISK_RESERVE_BYTES:-2147483648}
+      GOMEMLIMIT: 24MiB
+      REDIS_URL: redis://redis:6379
+      REDIS_STREAM_MARKET_EVENTS: polymarket:market_events
+      REDIS_KEY_ACTIVE_MARKETS: polymarket:active_markets
+      REDIS_KEY_ACTIVE_MARKETS_COUNT: polymarket:active_markets:count
+      REDIS_PUBSUB_CHANNEL: polymarket:events
+      SKIP_ACTIVE_MARKETS_CACHE: "false"
+      QUEUE_SIZE: ${PMXT_QUEUE_SIZE:-8192}
+      MAX_ASSETS_PER_CONN: "500"
+      DEDUP_TTL_SECONDS: "10"
+      MAX_BATCH: "200"
+      LINGER_MS: "2"
+      EXCLUDE_HASH: "false"
+      ORDERBOOK_CONSUMER_GROUP: polymarket-orderbook-pubsub
+      ORDERBOOK_CONSUMER_NAME: polymarket-orderbook-pubsub-1
+      RUST_LOG: info,polymarket_orderbook_rust_pubsub=info,polymarket_orderbook_rust=info
+    depends_on:
+      receiver: {condition: service_healthy}
+      discovery: {condition: service_healthy}
+
+  worker:
+    <<: *common
+    image: polydata-worker:local
+    build: {context: ., target: worker}
+    mem_limit: 240m
+    memswap_limit: 480m
+    stop_grace_period: 30s
+    environment:
+      DATA_DIR: /data
+      REDIS_URL: redis://redis:6379
+      HF_REPO_ID: ${HF_REPO_ID:-}
+      HF_TOKEN_FILE: /run/secrets/hf_token
+      CHECK_MAX_BOOKS: ${CHECK_MAX_BOOKS:-64}
+      CHECK_MAX_LEVELS: ${CHECK_MAX_LEVELS:-20000}
+      PROBE_INTERVAL_SECONDS: ${PROBE_INTERVAL_SECONDS:-30}
+      ARROW_BATCH_BYTES: "1048576"
+      UPLOAD_INTERVAL_SECONDS: ${UPLOAD_INTERVAL_SECONDS:-600}
+      UPLOAD_BATCH_BYTES: "67108864"
+      LOCAL_RETENTION_SECONDS: ${LOCAL_RETENTION_SECONDS:-21600}
+      DISK_RESERVE_BYTES: ${DISK_RESERVE_BYTES:-2147483648}
+    volumes: ["./data:/data"]
+    secrets: [hf_token]
+    depends_on:
+      redis: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import json,time; s=json.load(open('/data/state/worker.json')); raise SystemExit(time.time_ns()-s['time_ns']>600_000_000_000)"]
+      interval: 60s
+      start_period: 300s
+      retries: 3
+
+volumes:
+  redis-data:
+secrets:
+  hf_token:
+    file: .secrets/hf_token

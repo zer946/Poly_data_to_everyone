@@ -1,0 +1,10 @@
+.git
+.env
+.secrets
+data
+__pycache__
+.pytest_cache
+**/__pycache__
+.upstream/.git
+.upstream/**/target
+.build-swap

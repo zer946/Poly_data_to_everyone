@@ -1,0 +1,52 @@
+name: Test and build
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.23.x'
+          cache: false
+      - run: python -m pip install -r requirements.txt pytest
+      - run: go test -race ./...
+      - run: python -m pytest -q
+      - run: go build -o /tmp/polyspool ./cmd/spool && python tests/smoke.py /tmp/polyspool
+      - run: bash -n deploy.sh manage.sh
+      - name: Validate Compose without credentials
+        run: |
+          mkdir -p .secrets
+          touch .secrets/hf_token
+          docker compose config --quiet
+  containers:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Fetch exact upstream
+        run: |
+          git init .upstream
+          git -C .upstream remote add origin https://github.com/pmxt-dev/polymarket-orderbook-collector.git
+          git -C .upstream fetch --depth 1 origin cb0f6631556bf460d03594fe20f9bbd020b47d19
+          git -C .upstream checkout --detach FETCH_HEAD
+      - name: Build sidecars and unmodified PMXT feed
+        run: |
+          docker build --target receiver -t polydata-receiver:test .
+          docker build --target worker -t polydata-worker:test .
+          docker build --target pmxt -t polydata-pmxt:test .
+          docker build -f .upstream/services/polymarket/polymarket-active-markets/Dockerfile .upstream
+          test -z "$(git -C .upstream status --porcelain)"

@@ -1,0 +1,11 @@
+.env
+.secrets/
+.upstream/
+data/
+__pycache__/
+.pytest_cache/
+*.pyc
+*.tmp
+.venv/
+polyspool
+.build-swap
