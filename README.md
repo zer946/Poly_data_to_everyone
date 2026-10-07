@@ -1,0 +1,2 @@
+# Poly_data_to_everyone
+一个采集polymarket数据到HuggingFace的项目
